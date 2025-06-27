@@ -8,7 +8,6 @@ An MCP-based high-performance PDF to Markdown conversion service powered by the 
 
 - **Format Conversion**: Convert PDF files to structured Markdown format.
 - **Multi-source Support**: Process both local PDF files and remote PDF URLs.
-- **Batch Processing**: Supports multi-file and multi-URL batch conversion.
 - **MCP Integration**: Seamlessly integrates with LLM clients like Claude Desktop.
 - **Structure Preservation**: Aims to maintain the original document structure, including headings, paragraphs, and lists.
 - **Image Extraction**: Automatically extracts images from the PDF and saves them locally.
@@ -24,26 +23,14 @@ An MCP-based high-performance PDF to Markdown conversion service powered by the 
 1.  Clone the repository and enter the directory:
 
     ```bash
-    git clone https://github.com/FutureUnreal/mcp-pdf2md.git
+    git clone https://github.com/zicez/mcp-pdf2md.git
     cd mcp-pdf2md
     ```
 
-2.  Create a virtual environment and install dependencies:
-
-    **Linux/macOS**:
+2.  Install dependencies with uv:
 
     ```bash
-    uv venv
-    source .venv/bin/activate
-    uv pip install -e .
-    ```
-
-    **Windows**:
-
-    ```bash
-    uv venv
-    .venv\Scripts\activate
-    uv pip install -e .
+    uv sync
     ```
 
 3.  Configure environment variables:
@@ -145,16 +132,6 @@ This project relies on the Mistral AI API for PDF content extraction. To obtain 
 3.  Create a new secret key.
 4.  Copy the generated API key.
 5.  Use this key as the value for `MISTRAL_API_KEY`.
-
-## Demo
-
-### Input PDF
-
-![Input PDF](images/input.png)
-
-### Output Markdown
-
-![Output Markdown](images/output.png)
 
 ## License
 

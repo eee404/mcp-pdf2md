@@ -1,0 +1,8 @@
+mcp>=1.0
+python-dotenv
+httpx
+typer
+mistralai
+python-datauri
+asyncio
+pathlib

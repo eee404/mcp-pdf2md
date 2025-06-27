@@ -1,3 +1,20 @@
+Metadata-Version: 2.4
+Name: pdf2md
+Version: 0.1.0
+Summary: PDF to Markdown MCP
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: mcp>=1.0
+Requires-Dist: python-dotenv
+Requires-Dist: httpx
+Requires-Dist: typer
+Requires-Dist: mistralai
+Requires-Dist: python-datauri
+Requires-Dist: asyncio
+Requires-Dist: pathlib
+Dynamic: license-file
+
 # MCP-PDF2MD
 
 # MCP-PDF2MD Service

@@ -1,0 +1,2 @@
+[console_scripts]
+pdf2md = pdf2md:main

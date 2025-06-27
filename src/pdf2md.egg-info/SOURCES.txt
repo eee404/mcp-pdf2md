@@ -1,0 +1,12 @@
+LICENSE
+README.md
+pyproject.toml
+src/pdf2md/__init__.py
+src/pdf2md/__main__.py
+src/pdf2md/server.py
+src/pdf2md.egg-info/PKG-INFO
+src/pdf2md.egg-info/SOURCES.txt
+src/pdf2md.egg-info/dependency_links.txt
+src/pdf2md.egg-info/entry_points.txt
+src/pdf2md.egg-info/requires.txt
+src/pdf2md.egg-info/top_level.txt

@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.10"
 
 [[package]]
@@ -276,7 +276,7 @@ dev = [
 requires-dist = [
     { name = "httpx" },
     { name = "mcp", specifier = ">=1.0" },
-    { name = "mistralai" },
+    { name = "mistralai", specifier = ">=1.0,<2" },
     { name = "python-datauri" },
     { name = "python-dotenv" },
     { name = "typer" },

@@ -53,43 +53,56 @@ def extract_first_heading(markdown_text):
     return '(empty page)'
 
 
-def save_ocr_response_to_markdown_and_images(ocr_response, output_md_path, output_dir_for_images):
+def save_ocr_response_to_markdown_and_images(ocr_response, output_md_path, output_dir_for_images, split_pages=False):
     """
-    Saves each page of the OCR response as a separate markdown file (page-001.md, etc.)
-    and generates an index.md with links to each page and a preview of its content.
+    Saves the OCR response markdown and images to disk.
+
+    If split_pages is False (default): all pages are concatenated into a single .md file.
+    If split_pages is True: each page is saved as page-001.md, page-002.md, etc.
+    and an index.md is generated with links and heading previews.
     """
     output_dir = Path(output_dir_for_images)
-    total_pages = len(ocr_response.pages)
     full_markdown_content = []
     saved_images = []
-    index_entries = []
 
     try:
-        for i, page in enumerate(ocr_response.pages):
-            page_num = i + 1
-            page_filename = f"page-{page_num:03d}.md"
-            page_path = output_dir / page_filename
+        if split_pages:
+            total_pages = len(ocr_response.pages)
+            index_entries = []
 
-            with open(page_path, "wt", encoding='utf-8') as f:
-                f.write(page.markdown)
+            for i, page in enumerate(ocr_response.pages):
+                page_num = i + 1
+                page_filename = f"page-{page_num:03d}.md"
+                page_path = output_dir / page_filename
 
-            full_markdown_content.append(page.markdown)
+                with open(page_path, "wt", encoding='utf-8') as f:
+                    f.write(page.markdown)
 
-            for image in page.images:
-                saved_image_path = save_image(image, output_dir_for_images)
-                if saved_image_path:
-                    saved_images.append(saved_image_path)
+                full_markdown_content.append(page.markdown)
 
-            heading = extract_first_heading(page.markdown)
-            index_entries.append(f"- [{page_filename}]({page_filename}) — {heading}")
+                for image in page.images:
+                    saved_image_path = save_image(image, output_dir_for_images)
+                    if saved_image_path:
+                        saved_images.append(saved_image_path)
 
-        # Write index.md
-        doc_name = Path(output_md_path).stem
-        index_path = output_dir / "index.md"
-        with open(index_path, "wt", encoding='utf-8') as f:
-            f.write(f"# {doc_name} ({total_pages} pages)\n\n")
-            f.write('\n'.join(index_entries))
-            f.write('\n')
+                heading = extract_first_heading(page.markdown)
+                index_entries.append(f"- [{page_filename}]({page_filename}) — {heading}")
+
+            doc_name = Path(output_md_path).stem
+            index_path = output_dir / "index.md"
+            with open(index_path, "wt", encoding='utf-8') as f:
+                f.write(f"# {doc_name} ({total_pages} pages)\n\n")
+                f.write('\n'.join(index_entries))
+                f.write('\n')
+        else:
+            with open(output_md_path, "wt", encoding='utf-8') as f:
+                for page in ocr_response.pages:
+                    f.write(page.markdown)
+                    full_markdown_content.append(page.markdown)
+                    for image in page.images:
+                        saved_image_path = save_image(image, output_dir_for_images)
+                        if saved_image_path:
+                            saved_images.append(saved_image_path)
 
         return "".join(full_markdown_content), saved_images
     except Exception as e:
@@ -115,12 +128,13 @@ def parse_input_string(input_string: str) -> List[str]:
 mcp = FastMCP("PDF to Markdown Conversion Service")
 
 @mcp.tool()
-async def convert_pdf_url(url: str) -> Dict[str, Any]:
+async def convert_pdf_url(url: str, split_pages: bool = False) -> Dict[str, Any]:
     """
     Convert a PDF from a URL to Markdown. The output is saved in the directory specified by --output-dir.
 
     Args:
         url: A single PDF URL or multiple URLs separated by spaces, commas, or newlines.
+        split_pages: If True, each page is saved as a separate file (page-001.md, etc.) with an index.md. If False (default), all pages are concatenated into a single .md file.
 
     Returns:
         A dictionary with the conversion results.
@@ -157,19 +171,23 @@ async def convert_pdf_url(url: str) -> Dict[str, Any]:
                 )
 
                 markdown_content, saved_images = save_ocr_response_to_markdown_and_images(
-                    ocr_response, output_md_path, output_dir
+                    ocr_response, output_md_path, output_dir, split_pages=split_pages
                 )
 
                 if markdown_content is not None:
-                    results.append({
+                    result_entry = {
                         "url": u,
                         "success": True,
-                        "index_file": str(output_dir / "index.md"),
                         "pages": len(ocr_response.pages),
                         "images": saved_images,
                         "output_directory": str(output_dir),
                         "content_length": len(markdown_content)
-                    })
+                    }
+                    if split_pages:
+                        result_entry["index_file"] = str(output_dir / "index.md")
+                    else:
+                        result_entry["markdown_file"] = str(output_md_path)
+                    results.append(result_entry)
                 else:
                     results.append({"url": u, "success": False, "error": "Could not save markdown or images."})
 
@@ -182,12 +200,13 @@ async def convert_pdf_url(url: str) -> Dict[str, Any]:
 
 
 @mcp.tool()
-async def convert_pdf_file(file_path: str) -> Dict[str, Any]:
+async def convert_pdf_file(file_path: str, split_pages: bool = False) -> Dict[str, Any]:
     """
     Convert a local PDF file to Markdown. Output is saved in a new folder named after the PDF in its original directory.
 
     Args:
         file_path: Path to a local PDF file or multiple paths separated by spaces, commas, or newlines.
+        split_pages: If True, each page is saved as a separate file (page-001.md, etc.) with an index.md. If False (default), all pages are concatenated into a single .md file.
 
     Returns:
         A dictionary with the conversion results.
@@ -226,19 +245,23 @@ async def convert_pdf_file(file_path: str) -> Dict[str, Any]:
             )
 
             markdown_content, saved_images = save_ocr_response_to_markdown_and_images(
-                ocr_response, output_md_path, output_dir
+                ocr_response, output_md_path, output_dir, split_pages=split_pages
             )
 
             if markdown_content is not None:
-                results.append({
+                result_entry = {
                     "file_path": path_str,
                     "success": True,
-                    "index_file": str(output_dir / "index.md"),
                     "pages": len(ocr_response.pages),
                     "images": saved_images,
                     "output_directory": str(output_dir),
                     "content_length": len(markdown_content)
-                })
+                }
+                if split_pages:
+                    result_entry["index_file"] = str(output_dir / "index.md")
+                else:
+                    result_entry["markdown_file"] = str(output_md_path)
+                results.append(result_entry)
             else:
                 results.append({"file_path": path_str, "success": False, "error": "Could not save markdown or images."})
 

@@ -37,25 +37,63 @@ def save_image(image, output_dir):
         print(f"  Error saving image {image.id}: {e}")
         return None
 
+def extract_first_heading(markdown_text):
+    """Extract the first markdown heading from text, or first ~80 chars as fallback."""
+    import re
+    for line in markdown_text.split('\n'):
+        line = line.strip()
+        match = re.match(r'^(#{1,6})\s+(.+)', line)
+        if match:
+            return match.group(0)
+    # Fallback: first non-empty line, truncated
+    for line in markdown_text.split('\n'):
+        line = line.strip()
+        if line:
+            return line[:80] + ('...' if len(line) > 80 else '')
+    return '(empty page)'
+
+
 def save_ocr_response_to_markdown_and_images(ocr_response, output_md_path, output_dir_for_images):
     """
-    Saves the markdown content from each page of the OCR response to a file
-    and saves any associated images.
+    Saves each page of the OCR response as a separate markdown file (page-001.md, etc.)
+    and generates an index.md with links to each page and a preview of its content.
     """
+    output_dir = Path(output_dir_for_images)
+    total_pages = len(ocr_response.pages)
     full_markdown_content = []
     saved_images = []
+    index_entries = []
+
     try:
-        with open(output_md_path, "wt", encoding='utf-8') as f:
-            for page in ocr_response.pages:
+        for i, page in enumerate(ocr_response.pages):
+            page_num = i + 1
+            page_filename = f"page-{page_num:03d}.md"
+            page_path = output_dir / page_filename
+
+            with open(page_path, "wt", encoding='utf-8') as f:
                 f.write(page.markdown)
-                full_markdown_content.append(page.markdown)
-                for image in page.images:
-                    saved_image_path = save_image(image, output_dir_for_images)
-                    if saved_image_path:
-                        saved_images.append(saved_image_path)
+
+            full_markdown_content.append(page.markdown)
+
+            for image in page.images:
+                saved_image_path = save_image(image, output_dir_for_images)
+                if saved_image_path:
+                    saved_images.append(saved_image_path)
+
+            heading = extract_first_heading(page.markdown)
+            index_entries.append(f"- [{page_filename}]({page_filename}) — {heading}")
+
+        # Write index.md
+        doc_name = Path(output_md_path).stem
+        index_path = output_dir / "index.md"
+        with open(index_path, "wt", encoding='utf-8') as f:
+            f.write(f"# {doc_name} ({total_pages} pages)\n\n")
+            f.write('\n'.join(index_entries))
+            f.write('\n')
+
         return "".join(full_markdown_content), saved_images
     except Exception as e:
-        print(f"Error saving markdown file '{output_md_path}' or processing images: {e}")
+        print(f"Error saving markdown files or processing images: {e}")
         return None, []
 
 def parse_input_string(input_string: str) -> List[str]:
@@ -126,7 +164,8 @@ async def convert_pdf_url(url: str) -> Dict[str, Any]:
                     results.append({
                         "url": u,
                         "success": True,
-                        "markdown_file": str(output_md_path),
+                        "index_file": str(output_dir / "index.md"),
+                        "pages": len(ocr_response.pages),
                         "images": saved_images,
                         "output_directory": str(output_dir),
                         "content_length": len(markdown_content)
@@ -194,7 +233,8 @@ async def convert_pdf_file(file_path: str) -> Dict[str, Any]:
                 results.append({
                     "file_path": path_str,
                     "success": True,
-                    "markdown_file": str(output_md_path),
+                    "index_file": str(output_dir / "index.md"),
+                    "pages": len(ocr_response.pages),
                     "images": saved_images,
                     "output_directory": str(output_dir),
                     "content_length": len(markdown_content)

@@ -12,6 +12,7 @@ import pytest_asyncio
 
 from pdf2md.server import (
     MAX_FILE_SIZE,
+    ConversionContext,
     _is_ip_encoding_trick,
     _validate_url,
     convert_pdf_file,
@@ -147,6 +148,45 @@ class TestExtractFirstHeading:
         result = extract_first_heading(long_line)
         assert len(result) == 83  # 80 + "..."
         assert result.endswith("...")
+
+    def test_short_heading_skipped(self):
+        """Heading with text < MIN_HEADING_LENGTH should be skipped."""
+        result = extract_first_heading("# AMD\nSome longer fallback text here")
+        # "AMD" is 3 chars < 6, so heading is skipped; fallback to longer line
+        assert result == "Some longer fallback text here"
+
+    def test_heading_boundary_5_chars(self):
+        """Heading text of 5 chars (< 6) should be skipped as heading,
+        but '# Hello' (7 chars total) qualifies as a fallback line."""
+        result = extract_first_heading("# Hello\nA fallback line that is long enough")
+        # "Hello" is 5 chars < MIN_HEADING_LENGTH, so not matched as heading.
+        # But "# Hello" is 7 chars >= MIN_HEADING_LENGTH, so returned as fallback.
+        assert result == "# Hello"
+
+    def test_heading_boundary_6_chars(self):
+        """Heading text of exactly 6 chars should be retained."""
+        result = extract_first_heading("# Helloo\nFallback")
+        assert result == "# Helloo"
+
+    def test_only_short_lines(self):
+        """All lines too short → falls back to first line truncated."""
+        result = extract_first_heading("Hi\nOk\nYo")
+        assert result == "Hi"
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: ConversionContext
+# ---------------------------------------------------------------------------
+
+class TestConversionContext:
+    def test_safe_doc_name_sanitizes_gt(self):
+        ctx = ConversionContext(doc_name="test-->file", total_pages=5)
+        assert ">" not in ctx.safe_doc_name
+        assert "&gt;" in ctx.safe_doc_name
+
+    def test_safe_doc_name_no_change_needed(self):
+        ctx = ConversionContext(doc_name="normal-file", total_pages=5)
+        assert ctx.safe_doc_name == "normal-file"
 
 
 # ---------------------------------------------------------------------------
@@ -309,15 +349,16 @@ class TestConvertPdfFileMocked:
 
         # Verify output structure
         out_dir = Path(entry["output_directory"])
+        assert out_dir.name == "PDF_test-doc"
         assert (out_dir / "full.md").exists()
         assert (out_dir / "pages" / "index.md").exists()
         assert (out_dir / "pages" / "page-001.md").exists()
         assert (out_dir / "pages" / "page-002.md").exists()
         assert (out_dir / "images").is_dir()
-        assert (out_dir / "source").is_dir()
+        assert (out_dir / ".source").is_dir()
 
         # Source PDF should have been moved
-        assert (out_dir / "source" / "test-doc.pdf").exists()
+        assert (out_dir / ".source" / "test-doc.pdf").exists()
         assert not pdf_file.exists()
 
     @patch("pdf2md.server.MISTRAL_API_KEY", "fake-key")
@@ -327,7 +368,7 @@ class TestConvertPdfFileMocked:
         pdf_file.write_bytes(b"%PDF-1.4 fake")
 
         # Pre-create output dir to trigger overwritten
-        out_dir = tmp_path / "doc"
+        out_dir = tmp_path / "PDF_doc"
         out_dir.mkdir()
 
         mock_client = MagicMock()
@@ -354,6 +395,73 @@ class TestConvertPdfFileMocked:
             entry = result["results"][0]
             assert entry["success"] is False
             assert "Could not save" in entry["error"]
+
+    @patch("pdf2md.server.MISTRAL_API_KEY", "fake-key")
+    @patch("pdf2md.server.Mistral")
+    async def test_lockfile_timeout(self, mock_mistral_cls, tmp_path):
+        """Simulate lock already acquired, verify timeout is handled."""
+        from filelock import FileLock
+
+        pdf_file = tmp_path / "doc.pdf"
+        pdf_file.write_bytes(b"%PDF-1.4 fake")
+
+        mock_client = MagicMock()
+        mock_mistral_cls.return_value = mock_client
+        mock_client.ocr.process.return_value = _make_ocr_response(["# Page 1"])
+
+        # Pre-create the output dir and acquire the lock
+        out_dir = tmp_path / "PDF_doc"
+        out_dir.mkdir()
+        lock_path = out_dir / ".converting.lock"
+        blocking_lock = FileLock(lock_path, timeout=0)
+        blocking_lock.acquire()
+
+        try:
+            # Patch timeout to 0 so it fails immediately
+            with patch("pdf2md.server.AsyncFileLock", side_effect=lambda path, timeout: __import__('filelock').AsyncFileLock(path, timeout=0)):
+                result = await convert_pdf_file(str(pdf_file))
+                entry = result["results"][0]
+                assert entry["success"] is False
+        finally:
+            blocking_lock.release()
+
+    @patch("pdf2md.server.MISTRAL_API_KEY", "fake-key")
+    @patch("pdf2md.server.Mistral")
+    async def test_html_comment_in_full_md(self, mock_mistral_cls, tmp_path):
+        """After conversion, full.md should start with an HTML comment."""
+        pdf_file = tmp_path / "test-doc.pdf"
+        pdf_file.write_bytes(b"%PDF-1.4 fake content")
+
+        mock_client = MagicMock()
+        mock_mistral_cls.return_value = mock_client
+        mock_client.ocr.process.return_value = _make_ocr_response(
+            ["# Page 1\nContent", "## Page 2\nMore content"]
+        )
+
+        result = await convert_pdf_file(str(pdf_file))
+        assert result["success"] is True
+        out_dir = Path(result["results"][0]["output_directory"])
+        full_md = (out_dir / "full.md").read_text(encoding="utf-8")
+        assert full_md.startswith("<!-- PDF: test-doc | 2 pages -->")
+
+    @patch("pdf2md.server.MISTRAL_API_KEY", "fake-key")
+    @patch("pdf2md.server.Mistral")
+    async def test_disclaimer_in_index_md(self, mock_mistral_cls, tmp_path):
+        """After conversion, index.md should contain the disclaimer."""
+        pdf_file = tmp_path / "test-doc.pdf"
+        pdf_file.write_bytes(b"%PDF-1.4 fake content")
+
+        mock_client = MagicMock()
+        mock_mistral_cls.return_value = mock_client
+        mock_client.ocr.process.return_value = _make_ocr_response(
+            ["# Page 1\nContent"]
+        )
+
+        result = await convert_pdf_file(str(pdf_file))
+        assert result["success"] is True
+        out_dir = Path(result["results"][0]["output_directory"])
+        index_md = (out_dir / "pages" / "index.md").read_text(encoding="utf-8")
+        assert "Headings are extracted automatically" in index_md
 
 
 # ---------------------------------------------------------------------------
@@ -382,7 +490,8 @@ class TestConvertPdfUrlMocked:
 
         # Source PDF saved
         out_dir = Path(entry["output_directory"])
-        assert (out_dir / "source" / "test.pdf").exists()
+        assert out_dir.name == "PDF_test"
+        assert (out_dir / ".source" / "test.pdf").exists()
 
     @patch("pdf2md.server.MISTRAL_API_KEY", "fake-key")
     @patch("pdf2md.server.Mistral")
@@ -390,7 +499,7 @@ class TestConvertPdfUrlMocked:
     @patch("pdf2md.server._validate_url")
     async def test_overwritten_flag(self, mock_validate, mock_download, mock_mistral_cls, tmp_path):
         # Pre-create output dir
-        (tmp_path / "test").mkdir()
+        (tmp_path / "PDF_test").mkdir()
 
         mock_download.return_value = b"%PDF-1.4 fake"
         mock_client = MagicMock()
@@ -508,5 +617,5 @@ class TestSmokeIntegration:
         assert (out_dir / "pages").is_dir()
         assert (out_dir / "pages" / "index.md").exists()
         assert (out_dir / "images").is_dir()
-        assert (out_dir / "source").is_dir()
-        assert (out_dir / "source" / "ViewFile-6.pdf").exists()
+        assert (out_dir / ".source").is_dir()
+        assert (out_dir / ".source" / "ViewFile-6.pdf").exists()

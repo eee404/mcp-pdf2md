@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import socket
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List
 from urllib.parse import urlparse
@@ -11,6 +12,7 @@ from urllib.parse import urlparse
 import datauri
 import httpx
 from dotenv import load_dotenv
+from filelock import AsyncFileLock
 from mcp.server.fastmcp import FastMCP
 from mistralai import Mistral
 
@@ -23,6 +25,18 @@ MISTRAL_API_KEY = os.environ.get("MISTRAL_API_KEY")
 # Size limit: 200 MB
 MAX_FILE_SIZE = 200 * 1024 * 1024
 MAX_REDIRECTS = 5
+MIN_HEADING_LENGTH = 6
+
+
+@dataclass
+class ConversionContext:
+    doc_name: str
+    total_pages: int
+
+    @property
+    def safe_doc_name(self) -> str:
+        """Sanitize doc_name for HTML comment injection."""
+        return self.doc_name.replace(">", "&gt;")
 
 
 def save_image(image, images_dir: Path) -> str | None:
@@ -45,13 +59,22 @@ def save_image(image, images_dir: Path) -> str | None:
 
 
 def extract_first_heading(markdown_text: str) -> str:
-    """Extract the first markdown heading from text, or first ~80 chars as fallback."""
+    """Extract the first markdown heading from text, or first ~80 chars as fallback.
+
+    Headings and fallback lines must have text of at least MIN_HEADING_LENGTH chars.
+    """
+    # Priority: markdown heading with text >= MIN_HEADING_LENGTH
     for line in markdown_text.split('\n'):
         line = line.strip()
         match = re.match(r'^(#{1,6})\s+(.+)', line)
-        if match:
+        if match and len(match.group(2)) >= MIN_HEADING_LENGTH:
             return match.group(0)
-    # Fallback: first non-empty line, truncated
+    # Fallback: first non-empty line with text >= MIN_HEADING_LENGTH
+    for line in markdown_text.split('\n'):
+        line = line.strip()
+        if line and len(line) >= MIN_HEADING_LENGTH:
+            return line[:80] + ('...' if len(line) > 80 else '')
+    # Last resort: first non-empty line truncated, or "(empty page)"
     for line in markdown_text.split('\n'):
         line = line.strip()
         if line:
@@ -87,20 +110,21 @@ def save_images(ocr_response, images_dir: Path) -> List[str]:
     return saved_images
 
 
-def write_full_markdown(ocr_response, output_dir: Path) -> str:
+def write_full_markdown(ocr_response, output_dir: Path, ctx: ConversionContext) -> str:
     """Write full.md with all pages concatenated. Image links point to images/."""
     full_content = []
     for page in ocr_response.pages:
         full_content.append(page.markdown)
     combined = "\n\n".join(full_content)
     combined = rewrite_image_links(combined, "images")
+    header = f"<!-- PDF: {ctx.safe_doc_name} | {ctx.total_pages} pages -->\n\n"
     full_path = output_dir / "full.md"
     with open(full_path, "wt", encoding='utf-8') as f:
-        f.write(combined)
+        f.write(header + combined)
     return combined
 
 
-def write_page_files(ocr_response, pages_dir: Path) -> None:
+def write_page_files(ocr_response, pages_dir: Path, ctx: ConversionContext) -> None:
     """Write individual page files (page-001.md, etc.) with image links to ../images/."""
     for i, page in enumerate(ocr_response.pages):
         page_num = i + 1
@@ -108,12 +132,13 @@ def write_page_files(ocr_response, pages_dir: Path) -> None:
         page_path = pages_dir / page_filename
         content = rewrite_image_links(page.markdown, "../images")
         with open(page_path, "wt", encoding='utf-8') as f:
+            if page_num == 1:
+                f.write(f"<!-- PDF: {ctx.safe_doc_name} | {ctx.total_pages} pages | This is page 1 -->\n\n")
             f.write(content)
 
 
-def write_index(ocr_response, pages_dir: Path, doc_name: str) -> None:
+def write_index(ocr_response, pages_dir: Path, ctx: ConversionContext) -> None:
     """Write pages/index.md with metadata, links, and heading previews."""
-    total_pages = len(ocr_response.pages)
     index_entries = []
     for i, page in enumerate(ocr_response.pages):
         page_num = i + 1
@@ -121,22 +146,29 @@ def write_index(ocr_response, pages_dir: Path, doc_name: str) -> None:
         heading = extract_first_heading(page.markdown)
         index_entries.append(f"- [{page_filename}]({page_filename}) — {heading}")
 
+    disclaimer = (
+        "<!-- Headings are extracted automatically and may not reflect actual page content.\n"
+        "For documents with a table of contents, check the first few pages.\n"
+        "To locate specific topics, use Grep on full.md rather than browsing page by page. -->\n\n"
+    )
+
     index_path = pages_dir / "index.md"
     with open(index_path, "wt", encoding='utf-8') as f:
-        f.write(f"# {doc_name} ({total_pages} pages)\n\n")
+        f.write(f"# {ctx.doc_name} ({ctx.total_pages} pages)\n\n")
+        f.write(disclaimer)
         f.write('\n'.join(index_entries))
         f.write('\n')
 
 
-def save_ocr_response(ocr_response, output_dir: Path, doc_name: str):
+def save_ocr_response(ocr_response, output_dir: Path, ctx: ConversionContext):
     """Orchestrate saving OCR response to the new directory structure.
 
-    Creates subdirectories (pages/, images/, source/) and delegates to sub-functions.
+    Creates subdirectories (pages/, images/, .source/) and delegates to sub-functions.
     Returns (markdown_content, saved_images) or (None, []) on error.
     """
     pages_dir = output_dir / "pages"
     images_dir = output_dir / "images"
-    source_dir = output_dir / "source"
+    source_dir = output_dir / ".source"
 
     pages_dir.mkdir(parents=True, exist_ok=True)
     images_dir.mkdir(parents=True, exist_ok=True)
@@ -144,9 +176,9 @@ def save_ocr_response(ocr_response, output_dir: Path, doc_name: str):
 
     try:
         saved_images = save_images(ocr_response, images_dir)
-        markdown_content = write_full_markdown(ocr_response, output_dir)
-        write_page_files(ocr_response, pages_dir)
-        write_index(ocr_response, pages_dir, doc_name)
+        markdown_content = write_full_markdown(ocr_response, output_dir, ctx)
+        write_page_files(ocr_response, pages_dir, ctx)
+        write_index(ocr_response, pages_dir, ctx)
         return markdown_content, saved_images
     except Exception as e:
         print(f"Error saving markdown files or processing images: {e}")
@@ -343,28 +375,32 @@ async def convert_pdf_url(url: str, output_dir: str = "./downloads") -> Dict[str
                 pdf_name = sanitize_filename(raw_name)
 
                 # Create output directory structure
-                doc_output_dir = output_base / pdf_name
+                doc_output_dir = output_base / f"PDF_{pdf_name}"
                 overwritten = doc_output_dir.exists()
                 doc_output_dir.mkdir(parents=True, exist_ok=True)
-                source_dir = doc_output_dir / "source"
-                source_dir.mkdir(parents=True, exist_ok=True)
 
-                # Save the downloaded PDF in source/
-                source_pdf_path = source_dir / f"{pdf_name}.pdf"
-                with open(source_pdf_path, "wb") as f:
-                    f.write(pdf_bytes)
+                lock_path = doc_output_dir / ".converting.lock"
+                async with AsyncFileLock(lock_path, timeout=300):
+                    source_dir = doc_output_dir / ".source"
+                    source_dir.mkdir(parents=True, exist_ok=True)
 
-                base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
+                    # Save the downloaded PDF in .source/
+                    source_pdf_path = source_dir / f"{pdf_name}.pdf"
+                    with open(source_pdf_path, "wb") as f:
+                        f.write(pdf_bytes)
 
-                ocr_response = client.ocr.process(
-                    model="mistral-ocr-latest",
-                    document={"type": "document_url", "document_url": f"data:application/pdf;base64,{base64_pdf}"},
-                    include_image_base64=True
-                )
+                    base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
 
-                markdown_content, saved_images = save_ocr_response(
-                    ocr_response, doc_output_dir, pdf_name
-                )
+                    ocr_response = client.ocr.process(
+                        model="mistral-ocr-latest",
+                        document={"type": "document_url", "document_url": f"data:application/pdf;base64,{base64_pdf}"},
+                        include_image_base64=True
+                    )
+
+                    ctx = ConversionContext(doc_name=pdf_name, total_pages=len(ocr_response.pages))
+                    markdown_content, saved_images = save_ocr_response(
+                        ocr_response, doc_output_dir, ctx
+                    )
 
                 if markdown_content is not None:
                     result_entry = {
@@ -438,30 +474,34 @@ async def convert_pdf_file(file_path: str) -> Dict[str, Any]:
                 continue
 
             # Create output directory structure
-            output_dir = input_path.parent / input_path.stem
+            output_dir = input_path.parent / f"PDF_{input_path.stem}"
             overwritten = output_dir.exists()
             output_dir.mkdir(parents=True, exist_ok=True)
 
-            with open(input_path, "rb") as pdf_file:
-                base64_pdf = base64.b64encode(pdf_file.read()).decode('utf-8')
+            lock_path = output_dir / ".converting.lock"
+            async with AsyncFileLock(lock_path, timeout=300):
+                with open(input_path, "rb") as pdf_file:
+                    base64_pdf = base64.b64encode(pdf_file.read()).decode('utf-8')
 
-            ocr_response = client.ocr.process(
-                model="mistral-ocr-latest",
-                document={"type": "document_url", "document_url": f"data:application/pdf;base64,{base64_pdf}"},
-                include_image_base64=True
-            )
+                ocr_response = client.ocr.process(
+                    model="mistral-ocr-latest",
+                    document={"type": "document_url", "document_url": f"data:application/pdf;base64,{base64_pdf}"},
+                    include_image_base64=True
+                )
 
-            markdown_content, saved_images = save_ocr_response(
-                ocr_response, output_dir, input_path.stem
-            )
+                ctx = ConversionContext(doc_name=input_path.stem, total_pages=len(ocr_response.pages))
+                markdown_content, saved_images = save_ocr_response(
+                    ocr_response, output_dir, ctx
+                )
+
+                if markdown_content is not None:
+                    # Move source PDF into .source/
+                    source_dir = output_dir / ".source"
+                    dest_pdf = source_dir / input_path.name
+                    if input_path != dest_pdf:
+                        shutil.move(str(input_path), str(dest_pdf))
 
             if markdown_content is not None:
-                # Move source PDF into source/
-                source_dir = output_dir / "source"
-                dest_pdf = source_dir / input_path.name
-                if input_path != dest_pdf:
-                    shutil.move(str(input_path), str(dest_pdf))
-
                 result_entry = {
                     "file_path": path_str,
                     "success": True,
@@ -496,10 +536,10 @@ PDF to Markdown Conversion Service provides two tools:
 - `convert_pdf_file`: Converts local PDF files. Output is saved to a new folder next to the original file.
 
 Both tools always produce the same output structure:
-- `full.md` — all pages concatenated
-- `pages/` — individual page files with an `index.md`
-- `images/` — extracted images
-- `source/` — original PDF
+- `PDF_document-name/full.md` — all pages concatenated
+- `PDF_document-name/pages/` — individual page files with an `index.md`
+- `PDF_document-name/images/` — extracted images
+- `PDF_document-name/.source/` — original PDF
 
 Please choose the appropriate tool based on the input type. For mixed inputs, call the tools separately.
 """
@@ -551,7 +591,7 @@ def get_usage_help() -> str:
 Both tools produce the same directory structure:
 
 ```
-document-name/
+PDF_document-name/
 ├── full.md              ← all pages concatenated
 ├── pages/
 │   ├── index.md         ← metadata, links, heading previews
@@ -560,7 +600,7 @@ document-name/
 ├── images/
 │   ├── img-001.jpeg
 │   └── ...
-└── source/
+└── .source/
     └── document-name.pdf
 ```
 
